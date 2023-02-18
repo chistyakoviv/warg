@@ -5,6 +5,10 @@
 #include <memory>
 #include <vector>
 #include <set>
+#include <algorithm>
+#include <cstring>
+#include <cassert>
+#include <sstream>
 
 /**
 /   What arguments project is a lib for parsing command line arguments.
@@ -12,7 +16,7 @@
 namespace warg {
 
 template <typename T>
-void convertTo(const std::string& str, T& res) {
+void convertStringTo(const std::string& str, T& res) {
     std::stringstream ss(str);
     ss >> res;
     if (!ss || ss.fail()) {
@@ -37,6 +41,10 @@ bool isNullCStr(T&) {
 
 bool isNullCStr(char* str) {
     return str == nullptr;
+}
+
+void throwUnknownParamException(const std::string& pos) {
+    throw std::invalid_argument("unknown parameter at: " + pos);
 }
 
 class BaseType {
@@ -65,9 +73,9 @@ public:
         try {
             bool isBool = isBoolean<T>();
             if (isBool && str.empty()) {
-                convertTo("1", type);
+                convertStringTo("1", type);
             } else {
-                convertTo(str, type);
+                convertStringTo(str, type);
             }
         } catch (const std::invalid_argument& e) {
             std::stringstream ss;
@@ -90,8 +98,15 @@ private:
 class Argument {
 public:
     template <typename T>
-    Argument(std::string name, std::string description, T& targetVar) : matched(false) {
-        target = std::make_unique(name, description, targetVar);
+    Argument(std::string name, std::string description, T& targetVar)
+        : matched(false),
+          target(std::make_unique<T>(name, description, targetVar)) {}
+
+    Argument(Argument& other) = delete;
+
+    Argument& operator=(Argument& other) {
+        swap(other);
+        return *this;
     }
 
     std::string getName() const {
@@ -115,6 +130,11 @@ public:
         return matched;
     }
 private:
+    void swap(Argument& other) {
+        std::swap(matched, other.matched);
+        std::swap(target, other.target);
+    }
+private:
     std::unique_ptr<BaseType> target;
     bool matched;
 };
@@ -128,35 +148,109 @@ public:
         Argument arg(name, description, target);
         registerArg(arg);
         if (isBoolean<T>()) {
-            boolArgsNames.insert(name);
+            boolArgNames.insert(name);
         }
         return *this;
     }
 
-    void parse(int argc, const char** argv) {
-
+    // Positional paremeter is a parameter specified without a key
+    template <typename T>
+    ArgPack& addPositional(T& target, const std::string& name, const std::string& description) {
+        add(target, name, description);
+        positionalArgNames.push_back(name);
+        return *this;
     }
 
-    std::string showHelp() {
+    void parse(int argc, const char** argv) {
+        size_t positionalIndex = 0;
+        for (int i = 1; i < argc; ++i) {
+            Argument* pArg = nullptr;
+            std::string argValue;
 
+            const char* const begin = argv[i];
+            const char* const end = begin + std::strlen(argv[i]);
+            const char* const assignPos = std::find(begin, end, '=');
+
+            if (assignPos != end) {
+                // The string has a assign symbol,
+                // try to split the string and interpret the part
+                // before the assign symbol as an argument name
+                std::string foundArgName(begin, assignPos);
+                argMapType::iterator it = args.find(foundArgName);
+
+                if (it != args.end()) {
+                    pArg = &it->second;
+                    argValue = std::string(assignPos + 1, end);
+                } else {
+                    throwUnknownParamException(argv[i]);
+                }
+            } else {
+                // Check if the argument is a boolean flag
+                argMapType::iterator it = args.find(argv[i]);
+                if (it != args.end()) {
+                    pArg = &it->second;
+                    // Leave the argument value empty
+                    // argValue = "";
+                } else if (positionalIndex < positionalArgNames.size()) {
+                    // Otherwise the string could only be a positional argument.
+                    // It's safe to request an argument by a position,
+                    // because positional arguments are added to both the dictionary and the positional array
+                    const std::string& argName = positionalArgNames[positionalIndex];
+                    pArg = &args[argName];
+                    argValue = argv[i];
+                    positionalIndex++;
+                } else {
+                    throwUnknownParamException(argv[i]);
+                }
+            }
+            assert(pArg);
+            if (pArg->isMatched()) {
+                throw std::invalid_argument("several values has been specified for '" + pArg->getName() + "' argument");
+            }
+            pArg->parse(argValue);
+        }
+    }
+
+    std::string showHelp(const std::string& binaryName) {
+        std::stringstream options;
+        std::stringstream description;
+
+        for (const std::string& argName : argsDisplayOrder) {
+            const Argument& arg = args[argName];
+            bool isBool = boolArgNames.find(argName) != boolArgNames.end();
+            options << " [" << arg.getName() << (isBool ? "" : "=value") << "]";
+            description << " " << arg.getName() << " - " << arg.getDescription() << " (" << arg.getValue() << ")\n";
+        }
+        for (const std::string& positionalArgName : positionalArgNames) {
+            options << " [" << positionalArgName;
+        }
+        for (size_t i = 0; i < positionalArgNames.size(); ++i) {
+            options << "]";
+        }
+        return "Usage: " + binaryName + options.str() + "\n\nOptions:" + description.str();
     }
 private:
-    void registerArg(const Argument& arg) {
-        auto [_, inserted] = args.insert(std::make_pair(arg.getName(), arg));
-        if (!inserted) {
-            throw std::invalid_argument("argument with name: '" + arg.getName() +
+    void registerArg(Argument& arg) {
+        const std::string& argName = arg.getName();
+        if (args.find(argName) != args.end()) {
+            throw std::invalid_argument("argument with name: '" + argName +
                                         "' already registered");
         }
-        argsDisplayOrder.push_back(arg.getName());
+        args[argName] = arg;
+        argsDisplayOrder.push_back(argName);
     }
 private:
     using argMapType = std::unordered_map<std::string, Argument>;
     using argsDisplayOrderType = std::vector<std::string>;
-    using boolArgsNamesType = std::set<std::string>;
+    using boolArgNamesType = std::set<std::string>;
+    using positionalArgNamesType = std::vector<std::string>;
 
     argMapType args;
     argsDisplayOrderType argsDisplayOrder;
-    boolArgsNamesType boolArgsNames;
+    // Store boolean arguments separately to distinguish them
+    // when printing usage information
+    boolArgNamesType boolArgNames;
+    positionalArgNamesType positionalArgNames;
 };
 
 void parse(int argc, char** argv, ArgPack& cliArguments) {
@@ -172,7 +266,7 @@ void parse(int argc, char** argv, ArgPack& cliArguments) {
         invalidUsage = true;
     }
     if (showHelp || invalidUsage) {
-        std::cout << cliArguments.showHelp() << "\n";
+        std::cout << cliArguments.showHelp(argv[0]) << "\n";
         std::exit(0);
     }
 }
