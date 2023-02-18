@@ -1,10 +1,12 @@
+#pragma once
+
 #include <iostream>
 #include <string>
 #include <stdexcept>
 #include <unordered_map>
 #include <memory>
 #include <vector>
-#include <set>
+#include <unordered_set>
 #include <algorithm>
 #include <cstring>
 #include <cassert>
@@ -55,7 +57,7 @@ public:
 
     virtual ~BaseType() = default;
 
-    virtual void parse(const std::string str) = 0;
+    virtual void parse(const std::string&) = 0;
     virtual std::string getValue() = 0;
 public:
     std::string name;
@@ -65,9 +67,10 @@ public:
 template <typename T>
 class Type : public BaseType {
 public:
+    Type() = default;
+
     Type(std::string name, std::string description, T& type)
-        : BaseType(name, description), type(type)
-    {}
+        : BaseType(name, description), type(type) {}
 
     void parse(const std::string& str) override {
         try {
@@ -80,7 +83,7 @@ public:
         } catch (const std::invalid_argument& e) {
             std::stringstream ss;
             ss << "'" << str << "' is incorrect input for argument '" << name << "':" << e.what();
-            throw std::invalid_argument(str.str());
+            throw std::invalid_argument(ss.str());
         }
     }
 
@@ -97,14 +100,23 @@ private:
 
 class Argument {
 public:
+    Argument()
+        : matched(false) {}
+
     template <typename T>
     Argument(std::string name, std::string description, T& targetVar)
         : matched(false),
-          target(std::make_unique<T>(name, description, targetVar)) {}
+          target(std::make_unique<Type<T>>(name, description, targetVar)) {}
 
-    Argument(Argument& other) = delete;
+    Argument(const Argument& other) = delete;
 
-    Argument& operator=(Argument& other) {
+    Argument& operator=(const Argument& other) = delete;
+
+    Argument(Argument&& other) noexcept {
+        swap(other);
+    }
+
+    Argument& operator=(Argument&& other) noexcept {
         swap(other);
         return *this;
     }
@@ -146,7 +158,7 @@ public:
     template <typename T>
     ArgPack& add(T& target, const std::string& name, const std::string& description) {
         Argument arg(name, description, target);
-        registerArg(arg);
+        registerArg(std::move(arg));
         if (isBoolean<T>()) {
             boolArgNames.insert(name);
         }
@@ -219,7 +231,7 @@ public:
             const Argument& arg = args[argName];
             bool isBool = boolArgNames.find(argName) != boolArgNames.end();
             options << " [" << arg.getName() << (isBool ? "" : "=value") << "]";
-            description << " " << arg.getName() << " - " << arg.getDescription() << " (" << arg.getValue() << ")\n";
+            description << " " << arg.getName() << " - " << arg.getDescription() << "\n";//<< " (" << arg.getValue() << ")\n";
         }
         for (const std::string& positionalArgName : positionalArgNames) {
             options << " [" << positionalArgName;
@@ -227,22 +239,22 @@ public:
         for (size_t i = 0; i < positionalArgNames.size(); ++i) {
             options << "]";
         }
-        return "Usage: " + binaryName + options.str() + "\n\nOptions:" + description.str();
+        return "Usage: " + binaryName + options.str() + "\n\nOptions:\n" + description.str();
     }
 private:
-    void registerArg(Argument& arg) {
+    void registerArg(Argument&& arg) {
         const std::string& argName = arg.getName();
         if (args.find(argName) != args.end()) {
             throw std::invalid_argument("argument with name: '" + argName +
                                         "' already registered");
         }
-        args[argName] = arg;
+        args[argName] = std::move(arg);
         argsDisplayOrder.push_back(argName);
     }
 private:
     using argMapType = std::unordered_map<std::string, Argument>;
     using argsDisplayOrderType = std::vector<std::string>;
-    using boolArgNamesType = std::set<std::string>;
+    using boolArgNamesType = std::unordered_set<std::string>;
     using positionalArgNamesType = std::vector<std::string>;
 
     argMapType args;
@@ -259,7 +271,7 @@ void parse(int argc, char** argv, ArgPack& cliArguments) {
     cliArguments.add(showHelp, "-h", "show usage info");
 
     try {
-        cliArguments.parse(argc, argv);
+        cliArguments.parse(argc, const_cast<const char**>(argv));
     } catch (const std::exception& e) {
         std::cerr << "error parsing command line arguments.\n"
                   << "error message: " << e.what() << "\n";
